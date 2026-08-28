@@ -22,9 +22,18 @@
 #
 # Any row not tagged `message` is ignored: this board carries no decision
 # forms, so a `choice` row (if one ever appeared) is not ticket-board input.
-# A result with no message rows prints `captured: 0` and exits 0 without
-# touching the store or rebuilding - firstmate need not treat "captain closed
-# the board without typing anything" as an error.
+# A result that provably carries no queued content at all prints `captured: 0`
+# and exits 0 without touching the store or rebuilding - firstmate need not
+# treat "captain closed the board without typing anything" as an error. A
+# result that DOES carry queued content but yields zero parsed ticket rows -
+# a feedback-framed result, or a parse the reader could not complete - is a
+# distinct case and fails loudly instead, per bin/fm-procevent-lavish.sh's
+# `has-content` (see that script's header for the full contract): a ticket
+# the captain actually typed must never silently vanish as if he said nothing.
+#
+# The captured-result parsing itself is not implemented here: it delegates to
+# bin/fm-procevent-lavish.sh's `messages` and `has-content` subcommands, which
+# own the `prompts[N]{...}` wire format contract (see that script's header).
 #
 # Fail-closed: a missing or unreadable result file, or an updated store that
 # would not satisfy fm-ticket-board.v1, refuses before the existing durable
@@ -55,68 +64,6 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 STORE=${2:-$("$SCRIPT_DIR/fm-ticket-board.sh" store)}
 
-# Extract every freeform message row as one "title<TAB>body" output line.
-# Reads the declared field order rather than assuming a fixed column, exactly
-# like fm-procevent-lavish.sh's own cmd_answers. The `prompt` field carries
-# the full text the captain sent; `text` is Lavish's generic "Freeform
-# message" label and is used only if `prompt` is somehow absent. Title is the
-# first line (falling back to the full text when the first line is blank),
-# capped at 200 bytes; body is the full text with embedded control
-# characters (including newlines) flattened to spaces, capped at 4000 bytes.
-messages() {
-  perl -e '
-    use strict; use warnings;
-    my ($path) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
-      my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "message";
-      my $raw = (defined $f{prompt} && length $f{prompt}) ? $f{prompt} : $f{text};
-      next unless defined $raw;
-      $raw =~ s/^\s+|\s+$//g;
-      next unless length $raw;
-      my ($title) = split /\n/, $raw, 2;
-      $title =~ s/[\x00-\x1f\x7f]/ /g;
-      $title =~ s/^\s+|\s+$//g;
-      $title = $raw unless length $title;
-      $title = substr($title, 0, 200);
-      my $body = $raw;
-      $body =~ s/[\x00-\x1f\x7f]+/ /g;
-      $body =~ s/^\s+|\s+$//g;
-      next unless length $body;
-      $body = substr($body, 0, 4000);
-      print "$title\t$body\n";
-    }
-  ' "$1"
-}
-
 new_id() {
   # tkt-<UTC compact timestamp>-<4 hex>: unique enough for a captain-paced
   # single-operator feed; a collision is refused rather than silently merged.
@@ -125,10 +72,20 @@ new_id() {
 
 CAPTURED=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-ticket-consume.XXXXXX") || fail "cannot stage captured messages"
 trap 'rm -f -- "$CAPTURED"' EXIT
-messages "$RESULT" > "$CAPTURED"
+messages_rc=0
+"$SCRIPT_DIR/fm-procevent-lavish.sh" messages "$RESULT" > "$CAPTURED" || messages_rc=$?
+[ "$messages_rc" -eq 0 ] || fail "could not read the captured result to look for ticket messages: $RESULT"
 COUNT=$(wc -l < "$CAPTURED" | tr -d ' ')
 printf 'captured: %s\n' "$COUNT"
-[ "$COUNT" -gt 0 ] || exit 0
+if [ "$COUNT" -eq 0 ]; then
+  content_rc=0
+  "$SCRIPT_DIR/fm-procevent-lavish.sh" has-content "$RESULT" || content_rc=$?
+  case "$content_rc" in
+    1) exit 0 ;;
+    0) fail "the result carries queued content but no ticket rows were captured from it - format drift or an unrecognized content block, not a silent captain" ;;
+    *) fail "could not determine whether the result carries queued content - refusing to treat this as silence" ;;
+  esac
+fi
 
 [ -f "$STORE" ] || "$SCRIPT_DIR/fm-ticket-board.sh" init "$STORE" >/dev/null
 jq empty "$STORE" 2>/dev/null || fail "ticket store is not valid JSON: $STORE"

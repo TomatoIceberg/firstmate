@@ -30,8 +30,11 @@ bin/fm-ticket-board-consume.sh <result-file>
 ```
 
 This appends every freeform message in the captured result as one new Backlog ticket, then rebuilds and rearms the board so the new card is visible the next time the captain opens it.
-A captured result with no ticket-worthy message (the captain closed the board without typing anything) prints `captured: 0` and changes nothing - that is not news and needs no further action.
+A captured result that provably carries no queued content (the captain closed the board without typing anything) prints `captured: 0` and exits 0 with nothing changed - that is not news and needs no further action.
+A nonzero exit from this script, including a `captured: 0` line followed by a failure, means the result DID carry content that could not be turned into a ticket - treat that as a real failure to investigate, never as silence.
 Relay what was created to the captain in plain language (the ticket's title, not its internal id or the wake mechanics), then acknowledge with `bin/fm-procevent.sh handled <source-id> <sequence>` per the generic contract.
+
+If the captain used "Send & End" to submit the ticket, the rebuild this triggers cannot re-establish a listenable session for that board - `bin/fm-ticket-board.sh`'s header owns the verified detail - so no further captain-typed ticket is picked up until an agent runs `lavish-axi <board> --reopen` and reruns `bin/fm-ticket-board.sh build`. This is a known limitation shared with the bearings board, not something this skill auto-recovers from; if a captain reports a typed ticket never appearing, check for this before assuming another cause.
 
 ## Updating ticket status
 
