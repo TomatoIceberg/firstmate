@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-ticket-board-consume.sh: extracting freeform
-# `message` rows from a captured Lavish result, ignoring everything else,
-# appending tickets to the durable store, and fail-closed rebuild-before-publish.
+# `message` rows from a captured Lavish result via bin/fm-procevent-lavish.sh,
+# ignoring non-message rows, appending tickets to the durable store,
+# fail-closed rebuild-before-publish, and distinguishing a provably empty
+# result from one whose content could not be turned into a ticket.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -103,9 +105,43 @@ test_consume_splits_title_from_a_multiline_body() {
   pass "consume derives the title from the first line and flattens the full body"
 }
 
-test_consume_ignores_non_message_rows() {
-  local home result store
+test_consume_ignores_a_choice_row_alongside_a_message() {
+  local home result store out
   home=$(make_home ignore-choice)
+  result="$home/result.txt"
+  store="$home/data/tickets.json"
+  cat > "$result" <<'EOF'
+session:
+  file: /board.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "","Captain's Call answer","",choice,"Option A"
+  "","Fix the header spacing","",message,Freeform message
+EOF
+  out=$(run_consume "$home" "$result") || fail "consume failed on a mixed choice+message result"
+  assert_contains "$out" "captured: 1" "the choice row was not ignored alongside the message: $out"
+  jq -e '.tickets | length == 1' "$store" >/dev/null || fail "the store does not have exactly one ticket"
+  jq -e '.tickets[0].title == "Fix the header spacing"' "$store" >/dev/null \
+    || fail "the ticket title does not match the message row, not the choice row"
+  pass "consume ignores a choice row and still captures the message row beside it"
+}
+
+test_consume_accepts_a_provably_empty_ended_result() {
+  local home result store out
+  home=$(make_home provably-empty)
+  result="$home/result.txt"
+  store="$home/data/tickets.json"
+  printf 'session:\n  file: /board.html\n  status: ended\n  ended_by: user\n' > "$result"
+
+  out=$(run_consume "$home" "$result") || fail "consume failed on a genuinely empty ended result"
+  assert_contains "$out" "captured: 0" "a provably empty result was not reported as zero captured: $out"
+  assert_absent "$store" "consume created a store for a result that carried no content at all"
+  pass "consume accepts a provably empty result as the captain saying nothing"
+}
+
+test_consume_fails_when_content_present_but_no_message_rows() {
+  local home result store rc out
+  home=$(make_home content-no-messages)
   result="$home/result.txt"
   store="$home/data/tickets.json"
   cat > "$result" <<'EOF'
@@ -115,10 +151,12 @@ session:
 prompts[1]{uid,prompt,selector,tag,text}:
   "","Captain's Call answer","",choice,"Option A"
 EOF
-  out=$(run_consume "$home" "$result") || fail "consume failed on a choice-only result"
-  assert_contains "$out" "captured: 0" "a choice-tagged row was mistaken for a ticket: $out"
-  assert_absent "$store" "consume created a store for a result with no ticket content"
-  pass "consume ignores rows not tagged message and never mutates the store"
+  set +e; out=$(run_consume "$home" "$result" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "consume silently accepted content-bearing rows with no captured tickets: $out"
+  assert_contains "$out" "captured: 0" "consume did not report the zero-message parse before failing: $out"
+  assert_contains "$out" "no ticket rows were captured" "the failure did not explain the mismatch: $out"
+  assert_absent "$store" "consume created a store despite failing to explain unparsed content"
+  pass "consume fails loudly when content is present but no ticket rows were captured, instead of reporting silence"
 }
 
 test_consume_refuses_a_missing_result_file() {
@@ -155,6 +193,8 @@ SH
 test_consume_extracts_a_message_and_appends_a_ticket
 test_consume_creates_the_store_when_absent
 test_consume_splits_title_from_a_multiline_body
-test_consume_ignores_non_message_rows
+test_consume_ignores_a_choice_row_alongside_a_message
+test_consume_accepts_a_provably_empty_ended_result
+test_consume_fails_when_content_present_but_no_message_rows
 test_consume_refuses_a_missing_result_file
 test_consume_does_not_publish_when_rebuild_fails

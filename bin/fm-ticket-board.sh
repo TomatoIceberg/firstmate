@@ -35,6 +35,17 @@
 #                served: <path>
 #                armed: <source-id>            (first registration)
 #                already-armed: <source-id>    (registration already present)
+#              KNOWN LIMITATION, verified live and shared verbatim with
+#              fm-bearings-board.sh, not unique to this script: `lavish-axi
+#              "$board"` exits 0 and prints `status: user-ended` rather than
+#              failing when the captain explicitly ended that session from the
+#              browser (Send & End), so this refusal is silent to a caller
+#              that only checks the exit code. It does not create a new
+#              listenable session, so the ticket board's pickup loop stops
+#              accepting new captain-typed tickets until an agent runs
+#              `lavish-axi <board> --reopen` by hand. The natural captain
+#              gesture - type a ticket, Send & End, close the tab - triggers
+#              exactly this.
 #              Refuses if the store is missing or malformed, and never
 #              touches an existing board in that case.
 # set-status   Convenience for the documented "firstmate updates ticket status
