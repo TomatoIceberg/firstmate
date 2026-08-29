@@ -57,7 +57,8 @@ It keeps polling through unknown quota and wakes when known quota drops below th
 When the optional Telegram bridge is configured, the captain's inbound channel is armed and handled through `bin/fm-procevent-telegram.sh`.
 Its header owns the allowlist, the note write, and the acknowledgement discipline; [`docs/telegram-bridge.md`](../../../docs/telegram-bridge.md) owns operator setup.
 An allowed message becomes an ordinary captain inbox note that wakes you on its own, so a quiet collection cycle is deliberately silent and you only hear about this source when something needs you.
-`classify` returns `unconfigured`, `error`, `disabled`, or `idle`: `unconfigured` means somebody messaged the bot before an allowed chat id was set, and the only action is to relay that chat id to the captain for confirmation - never allowlist it yourself, because the first sender need not be him.
+`classify` returns `unconfigured`, `error`, `disabled`, `busy`, or `idle`: `unconfigured` means somebody messaged the bot before an allowed chat id was set, and the only action is to relay that chat id to the captain for confirmation - never allowlist it yourself, because the first sender need not be him.
+`busy` and `idle` are both silent and need no action; never run `poll` yourself in a conversational turn, because that is the second collector `busy` exists to turn away.
 
 For a "do X as soon as Y is true" request whose condition AND action are both genuinely exact and deterministic, register a condition->action watch instead of re-checking in conversational turns:
 

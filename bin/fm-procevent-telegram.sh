@@ -16,7 +16,7 @@
 #            run in a conversational turn. It long-polls Telegram, turns allowed
 #            messages into durable captain notes, and exits with a result.
 # classify   Print what a handler should act on: unconfigured, error, disabled,
-#            idle, or unknown.
+#            busy, idle, or unknown.
 # terminal   Exit 0 only when the bridge has been switched off, so removing the
 #            token retires the registration instead of leaving a dead poller.
 # silent     Exit 0 for a result that carries no news, so a quiet collection
@@ -70,6 +70,19 @@
 # The result is that a message is neither queued twice nor dropped across a
 # restart at any point in the cycle.
 #
+# ONE COLLECTOR AT A TIME, ENFORCED HERE. The runner keeps one registered owner
+# per source, but a `poll` typed at a terminal never asks the runner for that
+# claim, so the header note above is not by itself an enforcement. Two pollers
+# blocked on getUpdates at the same offset are both handed the identical update,
+# and both would write a note for it - a duplicate the offset discipline below
+# cannot see, because each collection is internally correct. So the whole cycle
+# runs under one home-scoped lock, and a collector that cannot take it stands
+# down with a `busy` result rather than waiting: waiting would only queue long
+# polls behind each other. Standing down carries no news, so it wakes nobody,
+# and it is not terminal, so the runner starts a fresh collector on its next
+# reconcile. The lock is the shared one from bin/fm-wake-lib.sh, which reclaims
+# it from a holder that died rather than leaving the bridge wedged.
+#
 # A SUSTAINED OUTAGE DEGRADES QUIETLY. A failed request is retried with capped
 # backoff and reported nowhere; only a long run of consecutive failures ends the
 # cycle with an error result, which the runner publishes as one ordinary wake.
@@ -117,6 +130,7 @@ POLL_FAIL_DELAY=${FM_TELEGRAM_POLL_FAIL_DELAY:-10}
 STATE_DIR=$(fm_telegram_state_dir)
 OFFSET_FILE="$STATE_DIR/offset"
 CLAIM_FILE="$STATE_DIR/claim"
+POLL_LOCK="$STATE_DIR/poll.lock"
 
 read_offset() {
   local v
@@ -158,11 +172,28 @@ recover_claim() {
   rm -f "$CLAIM_FILE"
 }
 
+# Decode one message body back to its bytes. Kept as a pipeline the callers
+# feed into directly, because a command substitution around it would strip every
+# trailing newline of the message - blank lines the captain actually typed.
+decode_body() {  # <base64>
+  printf '%s' "$1" | base64 --decode 2>/dev/null
+}
+
+# Does this message carry anything to queue? Answered on a decoded COPY, whose
+# lost trailing newlines cannot change the answer, so the body itself never has
+# to survive a round trip through a variable.
+message_has_content() {  # <base64>
+  local probe
+  probe=$(decode_body "$1") || return 1
+  [ -n "${probe//[[:space:]]/}" ]
+}
+
 # Write one allowed message as a durable captain note. The body goes in on
-# stdin, so no part of it is ever seen by a shell.
-queue_note() {  # <update-id> <text> <from>
-  local update_id=$1 text=$2 from=$3
-  printf '%s' "$text" | "$FM_ROOT/bin/fm-inbox.sh" note \
+# stdin, straight from the decoder, so no part of it is ever seen by a shell and
+# no part of it is dropped on the way.
+queue_note() {  # <update-id> <base64> <from>
+  local update_id=$1 body=$2 from=$3
+  decode_body "$body" | "$FM_ROOT/bin/fm-inbox.sh" note \
     --source telegram \
     --meta "telegram_update_id=$update_id" \
     --meta "telegram_from=$from" \
@@ -183,10 +214,23 @@ cmd_poll() {
 
   mkdir -p "$STATE_DIR" 2>/dev/null || die "cannot create $STATE_DIR"
   chmod 0700 "$STATE_DIR" 2>/dev/null || true
+
+  # Sourced here rather than at the top of the file so `classify`, `terminal`,
+  # and `silent` - which the runner calls on every captured result - stay leaf
+  # readers that touch no state.
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_ROOT_OVERRIDE="$FM_ROOT" . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if ! fm_lock_try_acquire "$POLL_LOCK"; then
+    result busy "another collector is already polling this home"
+    return 0
+  fi
+  # shellcheck disable=SC2064 # $POLL_LOCK is fixed by now; expand it here.
+  trap "fm_lock_release '$POLL_LOCK'" EXIT
+
   recover_claim || die "cannot resolve the outstanding update claim"
 
   local cycle=0 failures=0 notes=0 dropped=0 offset response ok
-  local updates update_id chat_id text from
+  local updates update_id chat_id body from
   while [ "$cycle" -lt "$POLL_MAX_CYCLES" ]; do
     cycle=$((cycle + 1))
     offset=$(read_offset)
@@ -225,16 +269,15 @@ cmd_poll() {
 
     [ -n "$updates" ] || continue
 
-    while IFS=$'\t' read -r update_id chat_id text from; do
+    while IFS=$'\t' read -r update_id chat_id body from; do
       [ -n "$update_id" ] || continue
 
       if fm_telegram_allowlisted && [ "$chat_id" = "$FM_TG_CHAT" ]; then
         # Claim first, so a crash anywhere in the next two steps is resolvable.
         fm_telegram_write_atomic "$CLAIM_FILE" "$update_id" \
           || die "cannot record the update claim"
-        text=$(printf '%s' "$text" | base64 --decode 2>/dev/null) || text=
-        if [ -n "${text//[[:space:]]/}" ]; then
-          if queue_note "$update_id" "$text" "$from"; then
+        if message_has_content "$body"; then
+          if queue_note "$update_id" "$body" "$from"; then
             notes=$((notes + 1))
             fm_telegram_send_text "$FM_TG_CHAT" 'Noted - firstmate will pick this up.' >/dev/null 2>&1 || true
           else
@@ -305,7 +348,7 @@ cmd_classify() {
   [ -f "$file" ] || die "result file does not exist: $file"
   status=$(result_field "$file" status)
   case "$status" in
-    unconfigured|error|disabled|idle) printf '%s\n' "$status" ;;
+    unconfigured|error|disabled|busy|idle) printf '%s\n' "$status" ;;
     *) printf 'unknown\n' ;;
   esac
 }
@@ -324,13 +367,15 @@ cmd_terminal() {
 # collection cycle is `idle`, and the notes it did collect announced themselves
 # through the inbox's own wake, so publishing a second wake for them would put a
 # notification in front of firstmate whose entire content is that it already has
-# one. Every other status - unconfigured, error, disabled, unknown, unreadable -
-# stays announced.
+# one. `busy` is the same kind of absence: the collector that holds the lock is
+# doing the work, so the one that stood down has nothing to report. Every other
+# status - unconfigured, error, disabled, unknown, unreadable - stays announced.
 cmd_silent() {
-  local file=${1-}
+  local file=${1-} status
   [ -n "$file" ] || usage
   [ -f "$file" ] || return 1
-  [ "$(result_field "$file" status)" = idle ]
+  status=$(result_field "$file" status)
+  [ "$status" = idle ] || [ "$status" = busy ]
 }
 
 cmd_arm() {

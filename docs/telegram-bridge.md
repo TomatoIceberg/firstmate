@@ -62,6 +62,7 @@ You need `curl` and `jq`.
      ```
 
    That first message is consumed rather than queued, so send a throwaway one.
+   Only one collector polls a home at a time, so if you come back to this step after arming, that manual run stands down and reports `status: busy` instead - let firstmate report the chat id, or retire the collector first.
 4. Arm the collector with `bin/fm-procevent-telegram.sh arm`.
    Firstmate keeps it running from then on.
 
@@ -105,6 +106,8 @@ Telegram holds undelivered messages for 24 hours, so anything sent while nothing
 Telegram treats a request for the next message as confirmation that the previous ones were received, and confirmed messages are gone for good.
 So the bridge confirms a message only after its note is durably written, records which message it is working on first, and resolves an interrupted one on the next start by checking whether that note actually landed.
 A message whose note could not be written is left unconfirmed, so Telegram sends it again.
+Only one collector polls a home at a time, because two of them waiting on the same message are both handed it and would each queue a note; the second one stands down and firstmate starts it again later.
+A collector that is killed outright does not wedge the next one.
 
 **An outage is quiet.**
 A failed request is retried and reported nowhere.

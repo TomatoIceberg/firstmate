@@ -183,7 +183,14 @@ queue_note() {
     printf 'source=%s\n' "$source"
     [ -z "$extra" ] || printf '%s\n' "$extra"
     printf -- '--\n'
-    printf '%s\n' "$body"
+    # The body verbatim. The record is line-oriented, so it gets a terminating
+    # newline only when the body does not already end in one: appending
+    # unconditionally would invent a blank line the caller never sent, and the
+    # trailing blank lines a caller DID send are content, not padding.
+    case "$body" in
+      *$'\n') printf '%s' "$body" ;;
+      *) printf '%s\n' "$body" ;;
+    esac
   } >"$tmp"
 
   # Publish the completed note atomically.
@@ -239,7 +246,12 @@ cmd_note() {
   if [ "$#" -eq 0 ]; then
     die "usage: fm-inbox.sh note [--source <name>] [--meta <key=value>]... <text>...   (or: note - to read stdin)"
   elif [ "$1" = "-" ]; then
-    body=$(cat)
+    # A bare $(cat) strips EVERY trailing newline, which silently truncates a
+    # body that deliberately ends in blank lines. The sentinel makes the read
+    # byte-exact; the empty-body refusal in queue_note still rejects a body that
+    # is nothing but whitespace.
+    body=$(cat; printf x)
+    body=${body%x}
   else
     body="$*"
   fi

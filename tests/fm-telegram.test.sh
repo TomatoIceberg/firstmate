@@ -401,6 +401,101 @@ test_an_unwritable_note_is_never_acknowledged() {
   pass "a message whose note cannot be written is never acknowledged to Telegram"
 }
 
+test_concurrent_collectors_never_queue_a_message_twice() {
+  local home first second declined result
+  home=$(make_home serialized)
+  reset_sent
+  set_failures 0
+  set_updates '[]'
+
+  # The window a direct `poll` opens next to the registered collector: both are
+  # already blocked in getUpdates on the SAME offset when a message arrives, so
+  # the API hands the identical update to each of them. Nothing in the runner
+  # can close this, because a direct invocation never asks the runner for the
+  # source claim - only the collector itself can refuse to be the second one.
+  POLL_TIMEOUT=3 POLL_CYCLES=2 run_poll "$home" 555 >"$TMP_ROOT/serialized-a" 2>&1 &
+  first=$!
+  POLL_TIMEOUT=3 POLL_CYCLES=2 run_poll "$home" 555 >"$TMP_ROOT/serialized-b" 2>&1 &
+  second=$!
+  sleep 1
+  set_updates "$(message_json 120 555 'say this once')"
+  wait "$first" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  unset POLL_TIMEOUT POLL_CYCLES
+
+  [ "$(note_count "$home")" = 1 ] \
+    || fail "concurrent collectors queued one message $(note_count "$home") time(s)"
+  [ "$(sent_count)" = 1 ] \
+    || fail "concurrent collectors acknowledged one message $(sent_count) time(s)"
+
+  # And the one that stood down said so, rather than looking like a quiet cycle
+  # that had simply found nothing.
+  declined=0
+  for result in "$TMP_ROOT/serialized-a" "$TMP_ROOT/serialized-b"; do
+    grep -q 'status: busy' "$result" || continue
+    declined=$((declined + 1))
+    [ "$("$ADAPTER" classify "$result")" = busy ] \
+      || fail "a collector that stood down was not classified as busy"
+    "$ADAPTER" silent "$result" || fail "standing down would wake firstmate"
+    "$ADAPTER" terminal "$result" \
+      && fail "standing down retired the captain's inbound channel"
+  done
+  [ "$declined" = 1 ] || fail "no collector stood down; polling was not serialized"
+  pass "a second collector stands down instead of collecting the same message twice"
+}
+
+test_a_crashed_collector_does_not_wedge_the_bridge() {
+  local home poller
+  home=$(make_home crashed)
+  reset_sent
+  set_failures 0
+  set_updates '[]'
+
+  # Hold the poll lock, then die the way a crash does: killed outright, so no
+  # cleanup of any kind runs and the lock is left behind. A collector that
+  # could not tell an abandoned lock from a live one would stop collecting the
+  # captain's messages entirely - a silent outage strictly worse than the
+  # duplicate the lock was added to prevent. `env` is backgrounded directly so
+  # the signal reaches the collector itself rather than a wrapper shell.
+  env FM_HOME="$home" FM_TELEGRAM_API_BASE="$API_BASE" \
+    TELEGRAM_BOT_TOKEN="$TOKEN" TELEGRAM_ALLOWED_CHAT_ID=555 \
+    FM_TELEGRAM_POLL_TIMEOUT=5 FM_TELEGRAM_POLL_MAX_CYCLES=5 \
+    "$ADAPTER" poll >/dev/null 2>&1 &
+  poller=$!
+  sleep 1
+  kill -9 "$poller" 2>/dev/null || true
+  wait "$poller" 2>/dev/null || true
+
+  set_updates "$(message_json 140 555 'after the crash')"
+  run_poll "$home" 555 >/dev/null 2>&1
+  [ "$(note_count "$home")" = 1 ] \
+    || fail "the bridge stayed wedged behind a crashed collector's lock"
+  note_body "$home" | grep -qx 'after the crash' \
+    || fail "the message collected after the crash is not the one that was sent"
+  pass "a crashed collector's lock is reclaimed rather than wedging the bridge"
+}
+
+test_a_message_body_keeps_its_trailing_blank_lines() {
+  local home body f
+  home=$(make_home trailing)
+  reset_sent
+  set_failures 0
+  # Trailing blank lines are message CONTENT, and the captain writes them: a
+  # note that ends mid-thought reads as a different message from one that ends
+  # on a deliberate pause. Built with ANSI-C quoting rather than a command
+  # substitution, which would strip them from the fixture itself.
+  body=$'first line\n\nlast line\n\n\n'
+  set_updates "$(message_json 130 555 "$body")"
+  run_poll "$home" 555 >/dev/null 2>&1
+
+  f=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' 2>/dev/null | head -n1)
+  [ -n "$f" ] || fail "a message ending in blank lines never became a note"
+  sed -n '/^--$/,$p' "$f" | tail -n +2 > "$TMP_ROOT/trailing-body"
+  printf '%s' "$body" | cmp -s - "$TMP_ROOT/trailing-body" \
+    || fail "the note body is not the message byte for byte"
+  pass "a message body keeps its trailing blank lines all the way into the note"
+}
+
 test_a_message_waiting_while_nothing_polls_is_collected() {
   local home
   home=$(make_home retained)
@@ -610,6 +705,9 @@ test_offset_advances_only_after_the_note_is_written
 test_restart_after_a_written_note_does_not_duplicate_it
 test_restart_before_a_written_note_still_collects_it
 test_an_unwritable_note_is_never_acknowledged
+test_concurrent_collectors_never_queue_a_message_twice
+test_a_crashed_collector_does_not_wedge_the_bridge
+test_a_message_body_keeps_its_trailing_blank_lines
 test_a_message_waiting_while_nothing_polls_is_collected
 test_a_transient_outage_is_absorbed
 test_a_sustained_outage_ends_the_cycle_without_retiring_it
