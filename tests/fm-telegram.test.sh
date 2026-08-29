@@ -390,14 +390,20 @@ test_an_unwritable_note_is_never_acknowledged() {
     || fail "a message was acknowledged even though its note could not be written"
   printf '%s' "$out" | grep -q 'status: error' \
     || fail "a failed note write was not reported"
+  # Whether the note landed is ambiguous from here (fm-inbox.sh can still fail
+  # after moving the note into place), so the claim is left for the next
+  # start's recover_claim() to resolve the same way it resolves a crash,
+  # rather than guessed away here and risking a duplicate note.
   [ -f "$home/state/telegram/claim" ] \
-    && fail "a failed note write left a stale in-flight claim behind"
+    || fail "a failed note write discarded the in-flight claim needed to resolve it safely"
 
   # With the inbox writable again the message is still there to collect.
   set_updates "$(message_json 76 555 'must not be acknowledged')"
   run_poll "$home" 555 >/dev/null 2>&1
   [ "$(note_count "$home")" = 2 ] \
     || fail "the unacknowledged message was not collected on the next attempt"
+  [ -f "$home/state/telegram/claim" ] \
+    && fail "the stale claim was not resolved once the message was collected"
   pass "a message whose note cannot be written is never acknowledged to Telegram"
 }
 

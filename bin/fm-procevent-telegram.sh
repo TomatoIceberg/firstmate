@@ -145,9 +145,20 @@ read_offset() {
 # mid-write. Both pending and acknowledged notes are searched, because a note
 # handled before the restart is still a note that was queued.
 note_exists_for_update() {  # <update-id>
-  local id=$1 inbox="${FM_TELEGRAM_INBOX_OVERRIDE:-$FM_HOME/state/inbox}"
+  local id=$1 inbox="${FM_TELEGRAM_INBOX_OVERRIDE:-$FM_HOME/state/inbox}" f
   [ -d "$inbox" ] || return 1
-  grep -rlqx "telegram_update_id=$id" "$inbox" 2>/dev/null
+  while IFS= read -r -d '' f; do
+    # Scanned up to the `--` separator only: the body below it is untrusted
+    # captain text and is now written verbatim, so it can legitimately
+    # contain a line that reads like a meta field.
+    awk -v id="$id" '
+      BEGIN { rc = 1 }
+      /^--$/ { exit }
+      $0 == "telegram_update_id=" id { rc = 0; exit }
+      END { exit rc }
+    ' "$f" && return 0
+  done < <(find "$inbox" -type f -name '*.note' -print0 2>/dev/null)
+  return 1
 }
 
 # Resolve an outstanding claim left by a crash between writing a note and
@@ -281,8 +292,11 @@ cmd_poll() {
             notes=$((notes + 1))
             fm_telegram_send_text "$FM_TG_CHAT" 'Noted - firstmate will pick this up.' >/dev/null 2>&1 || true
           else
-            # The note did not land, so the offset must not move past it.
-            rm -f "$CLAIM_FILE"
+            # Whether the note landed is ambiguous here too: fm-inbox.sh's
+            # queue_note moves the note into place before it can still fail
+            # on the wake step. Leave the claim in place so the next start's
+            # recover_claim() resolves it the same way it resolves a crash,
+            # instead of guessing here and risking a duplicate note.
             result error "a received message could not be queued as a note" \
               "notes=$notes" "dropped=$dropped"
             return 0
