@@ -18,7 +18,8 @@ Follow the same architecture as the `bearings` skill's Lavish board mode: serve-
 ## Building or opening the board
 
 Run `bin/fm-ticket-board.sh build` to create or rebuild the board in place; it is idempotent and safe to re-run, and never arms a second registration for the same board.
-Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and the watcher's ordinary reconcile restarts it after each captured result.
+Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll.
+A result the adapter classifies terminal - an ended session, or one with no live session left to produce another result - retires the source instead of restarting the poll; `build` re-establishes the session and re-arms the source the next time anything calls it (see the known limitation below for when that matters).
 
 ## Handling a board wake
 
@@ -34,7 +35,8 @@ A captured result that provably carries no queued content (the captain closed th
 A nonzero exit from this script, including a `captured: 0` line followed by a failure, means the result DID carry content that could not be turned into a ticket - treat that as a real failure to investigate, never as silence.
 Relay what was created to the captain in plain language (the ticket's title, not its internal id or the wake mechanics), then acknowledge with `bin/fm-procevent.sh handled <source-id> <sequence>` per the generic contract.
 
-If the captain used "Send & End" to submit the ticket, the rebuild this triggers cannot re-establish a listenable session for that board - `bin/fm-ticket-board.sh`'s header owns the verified detail - so no further captain-typed ticket is picked up until an agent runs `lavish-axi <board> --reopen` and reruns `bin/fm-ticket-board.sh build`. This is a known limitation shared with the bearings board, not something this skill auto-recovers from; if a captain reports a typed ticket never appearing, check for this before assuming another cause.
+`bin/fm-ticket-board.sh build` verifies the session it gets back from `lavish-axi` is genuinely open and deliberately reopens it when the captain ended it from the browser (Send & End, or More -> End session) - `bin/fm-ticket-board.sh`'s header owns the verified detail. That happens on every `build` call, including the one this consume step runs right after appending a new ticket, so a captain submitting a ticket via "Send & End" keeps working with no manual recovery.
+KNOWN LIMITATION: if the captain closes the board without typing anything, that is genuinely silence - no wake fires, and the adapter retires the source since it has nothing left to produce. Nothing then re-arms it on its own schedule; the board stays unarmed until something next calls `build`, which could be a while if no other board activity happens in the meantime. This is the inherited half of the limitation `bin/fm-bearings-board.sh` also carries, not something this skill auto-recovers from. If a captain reports a typed ticket never appearing and nothing else has touched the board since, run `bin/fm-ticket-board.sh build` by hand.
 
 ## Updating ticket status
 

@@ -12,8 +12,9 @@
 # calls this script's `build` again to republish.
 #
 # Usage:
-#   fm-ticket-board.sh init  [<store.json>]
-#   fm-ticket-board.sh build [<store.json>]
+#   fm-ticket-board.sh init     [<store.json>]
+#   fm-ticket-board.sh build    [<store.json>]
+#   fm-ticket-board.sh validate [<store.json>]
 #   fm-ticket-board.sh set-status <ticket-id> <backlog|in_progress|done> [<store.json>]
 #   fm-ticket-board.sh path
 #   fm-ticket-board.sh store
@@ -35,19 +36,35 @@
 #                served: <path>
 #                armed: <source-id>            (first registration)
 #                already-armed: <source-id>    (registration already present)
-#              KNOWN LIMITATION, verified live and shared verbatim with
-#              fm-bearings-board.sh, not unique to this script: `lavish-axi
-#              "$board"` exits 0 and prints `status: user-ended` rather than
-#              failing when the captain explicitly ended that session from the
-#              browser (Send & End), so this refusal is silent to a caller
-#              that only checks the exit code. It does not create a new
-#              listenable session, so the ticket board's pickup loop stops
-#              accepting new captain-typed tickets until an agent runs
-#              `lavish-axi <board> --reopen` by hand. The natural captain
-#              gesture - type a ticket, Send & End, close the tab - triggers
-#              exactly this.
+#              This board is persistent, unlike a one-shot review artifact, so
+#              `build` verifies the session it gets back from `lavish-axi
+#              "$board"` actually reports status "opened" rather than trusting
+#              the exit code alone - verified live, `lavish-axi` exits 0 and
+#              prints status "user-ended" without reopening when the captain
+#              explicitly ended that session from the browser (Send & End, or
+#              More -> End session), which is also what happens to the session
+#              that just delivered a captain-typed ticket via Send & End. When
+#              the status is not "opened", `build` deliberately retries once
+#              with `lavish-axi "$board" --reopen` - safe and idempotent even
+#              when the session was already live - and only then fails loudly
+#              if the board still cannot be served, so a caller never sees a
+#              false `served:` line against a dead session. A captain closing
+#              the board without typing anything still ends that source's
+#              registration with no wake, because that is genuinely not news
+#              (see bin/fm-procevent-lavish.sh's `silent`/`terminal` contract);
+#              this self-heals the moment anything next calls `build`, which
+#              re-registers the source, but nothing calls `build` on its own
+#              schedule, so a captain report of "a typed ticket never
+#              appeared" with no other board activity since should prompt an
+#              agent to run `build` by hand.
 #              Refuses if the store is missing or malformed, and never
 #              touches an existing board in that case.
+# validate     Validate an fm-ticket-board.v1 store without building or
+#              publishing anything: exits 0 when it satisfies the schema,
+#              exits 1 with a diagnostic otherwise. The single owner of that
+#              schema check - `build` and `set-status` use it internally, and
+#              bin/fm-ticket-board-consume.sh reuses this subcommand rather
+#              than reimplementing it before publishing a staged store.
 # set-status   Convenience for the documented "firstmate updates ticket status
 #              by re-running the build script with an updated JSON store"
 #              operator flow: set one ticket's status in place, then rebuild.
@@ -97,6 +114,20 @@ fail() {
 
 board_path() { printf '%s/.lavish/ticket-board.html\n' "$FM_HOME"; }
 store_path() { printf '%s/tickets.json\n' "$DATA"; }
+
+# Read the `status:` field of an `lavish-axi <artifact>` invocation's own
+# leading `session:` block. Same shape bin/fm-procevent-lavish.sh reads from a
+# captured poll RESULT, but this reads the interactive open/reopen command's
+# own stdout instead, so it stays local rather than reusing that adapter's
+# private helper across an unrelated data flow.
+session_status() {  # <lavish-axi output>
+  awk '
+    $0 == "session:" { in_s=1; next }
+    in_s && $0 !~ /^[[:space:]]/ { exit }
+    in_s && $0 ~ /^[[:space:]]+status:[[:space:]]*[A-Za-z_-]+[[:space:]]*$/ {
+      sub(/^[[:space:]]+status:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }
+  ' <<<"$1"
+}
 
 is_status() {
   local s
@@ -189,7 +220,20 @@ command_build() {
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-  lavish-axi "$board" || fail "cannot establish the board Lavish session"
+  local session_out status
+  session_out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
+  status=$(session_status "$session_out")
+  if [ "$status" != opened ]; then
+    # A persistent captain board must keep accepting tickets even after the
+    # captain ends the session from the browser - verified live, `lavish-axi`
+    # exits 0 and reports status "user-ended" without reopening unless told
+    # to. Reopen deliberately here rather than trusting that exit code and
+    # publishing a false `served:` line against a dead session.
+    session_out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the board Lavish session"
+    status=$(session_status "$session_out")
+  fi
+  [ "$status" = opened ] || fail "lavish-axi did not report an open board session (status: ${status:-unknown})"
+  printf '%s\n' "$session_out"
   printf 'served: %s\n' "$board"
 
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
@@ -202,6 +246,16 @@ command_build() {
       || fail "cannot arm the board as a process-event source"
     printf 'armed: %s\n' "$sid"
   fi
+}
+
+command_validate() {
+  local data=${1:-$(store_path)}
+  [ "$#" -le 1 ] || { usage >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  [ -f "$data" ] || fail "ticket store does not exist: $data (run: $0 init)"
+  jq empty "$data" 2>/dev/null || fail "ticket store is not valid JSON: $data"
+  validate_store "$data" || fail "ticket store does not satisfy $BOARD_SCHEMA: $data"
+  printf 'valid: %s\n' "$data"
 }
 
 command_set_status() {
@@ -232,6 +286,7 @@ command_set_status() {
 case "${1-}" in
   init) shift; command_init "$@" ;;
   build) shift; command_build "$@" ;;
+  validate) shift; command_validate "$@" ;;
   set-status) shift; command_set_status "$@" ;;
   path) board_path ;;
   store) store_path ;;

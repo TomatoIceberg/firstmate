@@ -20,8 +20,11 @@
 # rebuilds and rearms the board through `bin/fm-ticket-board.sh build` so the
 # new ticket is visible immediately.
 #
-# Any row not tagged `message` is ignored: this board carries no decision
-# forms, so a `choice` row (if one ever appeared) is not ticket-board input.
+# A row not tagged `message` is ignored only when it sits beside at least one
+# message row: this board carries no decision forms, so a `choice` row (if one
+# ever appeared) is not ticket-board input on its own. A result whose queued
+# content is entirely non-message rows is a distinct case, covered below, and
+# fails loudly rather than silently vanishing.
 # A result that provably carries no queued content at all prints `captured: 0`
 # and exits 0 without touching the store or rebuilding - firstmate need not
 # treat "captain closed the board without typing anything" as an error. A
@@ -35,10 +38,26 @@
 # bin/fm-procevent-lavish.sh's `messages` and `has-content` subcommands, which
 # own the `prompts[N]{...}` wire format contract (see that script's header).
 #
+# DEDUPLICATED AGAINST REPLAY. A captured result stays eligible for bounded
+# re-announcement until firstmate durably acknowledges it (see the
+# process-event-sources skill), so this script can run more than once against
+# the exact same result file - a crash between a prior run's success and that
+# acknowledgement is exactly this. Each new ticket therefore records the
+# resolved path of the result file it came from plus its row index as a
+# `source` field, and a row whose `source` already exists in the store is
+# skipped rather than appended again, so a replayed wake can never mint a
+# second ticket for the same captain message.
+#
 # Fail-closed: a missing or unreadable result file, or an updated store that
-# would not satisfy fm-ticket-board.v1, refuses before the existing durable
-# store is touched - the new content is built and validated in a private
-# staged copy first, and only replaces the store after that build succeeds.
+# would not satisfy fm-ticket-board.v1 (checked via `bin/fm-ticket-board.sh
+# validate`), refuses before the existing durable store is touched - new
+# tickets are appended to a private staged copy first, which is validated and
+# only then published. The staged store is published BEFORE the board is
+# rebuilt from it, not after: a rebuild failure after publish leaves the
+# board stale but the ticket durably recorded, which is the safer failure
+# mode than the reverse - the store is the durable record, the board is a
+# rebuildable view of it, and the captain must never be told a ticket exists
+# only for the record of it to have been silently dropped.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,24 +109,41 @@ fi
 [ -f "$STORE" ] || "$SCRIPT_DIR/fm-ticket-board.sh" init "$STORE" >/dev/null
 jq empty "$STORE" 2>/dev/null || fail "ticket store is not valid JSON: $STORE"
 
+# Every row's dedupe key is anchored to the exact result file it was read
+# from, not its text, so a captain legitimately typing the same words twice
+# on two different occasions is never mistaken for a replay.
+RESULT_REAL=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$RESULT") \
+  || fail "cannot resolve the result file path: $RESULT"
+
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 STAGED=$(umask 077; mktemp "${STORE%/*}/.tickets.XXXXXX") || fail "cannot stage the store"
 trap 'rm -f -- "$CAPTURED" "$STAGED" "$STAGED.next"' EXIT
 cp -p "$STORE" "$STAGED" || fail "cannot stage the store"
 
+ROW=0
+SKIPPED=0
 while IFS=$'\t' read -r title body; do
+  source_key="$RESULT_REAL#$ROW"
+  ROW=$((ROW + 1))
+  if jq -e --arg source "$source_key" 'any(.tickets[]; .source == $source)' "$STAGED" >/dev/null; then
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
   id=$(new_id)
   jq -e --arg id "$id" 'any(.tickets[]; .id == $id) | not' "$STAGED" >/dev/null \
     || fail "generated a colliding ticket id: $id"
-  jq --arg id "$id" --arg title "$title" --arg created "$NOW" --arg body "$body" \
-    '.tickets += [{id: $id, title: $title, status: "backlog", created: $created, body: $body}]' \
+  jq --arg id "$id" --arg title "$title" --arg created "$NOW" --arg body "$body" --arg source "$source_key" \
+    '.tickets += [{id: $id, title: $title, status: "backlog", created: $created, body: $body, source: $source}]' \
     "$STAGED" > "$STAGED.next" || fail "cannot append ticket: $id"
   mv -f -- "$STAGED.next" "$STAGED"
   printf 'ticket: %s %s\n' "$id" "$title"
 done < "$CAPTURED"
+[ "$SKIPPED" -eq 0 ] || printf 'skipped: %s already-recorded row(s) (replayed result)\n' "$SKIPPED"
 
-"$SCRIPT_DIR/fm-ticket-board.sh" build "$STAGED" \
+"$SCRIPT_DIR/fm-ticket-board.sh" validate "$STAGED" >/dev/null \
   || fail "the updated store does not satisfy fm-ticket-board.v1"
 if ! { chmod 0600 "$STAGED" && mv -f -- "$STAGED" "$STORE"; }; then
   fail "cannot publish the updated store"
 fi
+"$SCRIPT_DIR/fm-ticket-board.sh" build "$STORE" \
+  || fail "the store was published but the board rebuild failed - rerun: $SCRIPT_DIR/fm-ticket-board.sh build"

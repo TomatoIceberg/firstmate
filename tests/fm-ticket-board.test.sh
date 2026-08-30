@@ -17,8 +17,22 @@ make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  fake_lavish_axi_opened "$fakebin"
   printf '%s\n' "$home"
+}
+
+# A realistic-enough stub of `lavish-axi <artifact> [--reopen]` for the happy
+# path: any invocation reports a live, opened session, matching the exact
+# `session:` block shape a real open/reopen prints (verified live against
+# lavish-axi 0.1.x). Tests that need the "captain ended this session" path
+# install their own narrower stub instead - see
+# test_build_reopens_a_session_the_captain_ended below.
+fake_lavish_axi_opened() {  # <fakebin>
+  cat > "$1/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'session:\n  file: %s\n  status: opened\n' "$1"
+SH
+  chmod +x "$1/lavish-axi"
 }
 
 run_board() {  # <home> <args...>
@@ -198,6 +212,50 @@ SH
   pass "build establishes the Lavish session before arming"
 }
 
+test_build_reopens_a_session_the_captain_ended() {
+  local home data board out
+  home=$(make_home reopen)
+  data="$home/payload.json"
+  board="$home/.lavish/ticket-board.html"
+  write_valid_store "$data"
+  # Verified live: `lavish-axi <board>` exits 0 and reports status "user-ended"
+  # without reopening when the captain ended the session from the browser,
+  # and only `--reopen` re-establishes a live one.
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${2-}" = "--reopen" ]; then
+  printf 'session:\n  file: %s\n  status: opened\n' "$1"
+else
+  printf 'session:\n  file: %s\n  status: user-ended\n' "$1"
+fi
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+
+  out=$(run_board "$home" build "$data") || fail "build did not recover a captain-ended session"
+  assert_contains "$out" "status: opened" "build did not report the reopened session as opened: $out"
+  assert_contains "$out" "served: $board" "build did not claim served after reopening: $out"
+  assert_contains "$out" "armed: " "build did not (re-)arm the source after reopening: $out"
+  pass "build reopens a session the captain ended instead of falsely claiming served"
+}
+
+test_build_fails_loudly_when_reopen_cannot_establish_a_live_session() {
+  local home data rc out
+  home=$(make_home reopen-fails)
+  data="$home/payload.json"
+  write_valid_store "$data"
+  cat > "$home/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'session:\n  file: %s\n  status: user-ended\n' "$1"
+SH
+  chmod +x "$home/fakebin/lavish-axi"
+
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "build claimed success even though --reopen never reported an open session"
+  assert_contains "$out" "did not report an open" "the failure did not explain why: $out"
+  assert_not_contains "$out" "served: " "build must never print served: against a dead session"
+  pass "build fails loudly instead of claiming served when --reopen still cannot establish a live session"
+}
+
 test_rebuild_is_idempotent_and_does_not_double_arm() {
   local home data board out records
   home=$(make_home rearm)
@@ -262,6 +320,8 @@ test_init_creates_an_empty_store_and_is_idempotent
 test_build_refuses_a_missing_or_malformed_store
 test_build_serves_then_arms_with_no_captain_hold_binding
 test_build_does_not_arm_when_session_start_fails
+test_build_reopens_a_session_the_captain_ended
+test_build_fails_loudly_when_reopen_cannot_establish_a_live_session
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
 test_set_status_updates_and_rebuilds
