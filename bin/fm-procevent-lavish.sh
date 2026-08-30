@@ -84,8 +84,10 @@
 # `messages` is the sibling read for a board whose queued content is freeform
 # prose rather than structured decisions: it reports every row tagged `message`
 # as `<title>\t<body>` lines, title being the row's first line (capped 200
-# bytes) and body its full text with control characters flattened (capped 4000
-# bytes). Any caller reading what the captain typed into a board's conversation
+# characters) and body its full text with control characters flattened (capped
+# 4000 characters, decoded/re-encoded as UTF-8 so the cap lands on a character
+# boundary rather than splitting a multi-byte character). Any caller reading
+# what the captain typed into a board's conversation
 # panel calls this instead of re-parsing the `prompts[N]{...}` wire format
 # itself - that format is this adapter's contract, stated once here, per the
 # one-owner rule in `firstmate-coding-guidelines`.
@@ -629,18 +631,21 @@ cmd_read() {
 # format `cmd_answers` reads but keeping rows tagged `message` instead of
 # `choice`. `prompt` carries the full sent text; Lavish's generic `text` label
 # ("Freeform message") is used only when `prompt` is absent. Title is the
-# row's first line, trimmed and capped at 200 bytes (falling back to the full
-# text when the first line is blank); body is the full text with embedded
-# control characters flattened to spaces, capped at 4000 bytes. A row with no
-# usable text after trimming is skipped.
+# row's first line, trimmed and capped at 200 characters (falling back to the
+# full text when the first line is blank); body is the full text with embedded
+# control characters flattened to spaces, capped at 4000 characters. Both
+# fields are decoded/re-encoded as UTF-8 so the cap lands on a character
+# boundary rather than splitting a multi-byte character. A row with no usable
+# text after trimming is skipped.
 cmd_messages() {
   local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   perl -e '
     use strict; use warnings;
+    binmode STDOUT, ":encoding(UTF-8)";
     my ($path) = @ARGV;
-    open my $fh, "<", $path or exit 1;
+    open my $fh, "<:encoding(UTF-8)", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
       if (!@fields) {
