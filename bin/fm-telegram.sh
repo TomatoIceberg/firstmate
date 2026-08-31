@@ -7,8 +7,10 @@
 #   fm-telegram.sh status
 #
 # send    Send one plain-text message to the configured chat. This is the raw
-#         path, used for the acknowledgement the inbound poller sends back and
-#         for a reply the captain explicitly asked for.
+#         path, used for a reply the captain explicitly asked for. The inbound
+#         collector deliberately sends nothing of its own: firstmate's real
+#         reply follows shortly, so an automatic receipt was chatter the
+#         captain had to read twice, not reassurance.
 # notify  Send one ESCALATION. <kind> is one of `blocker`, `review-ready`, or
 #         `failure`, and nothing else is accepted.
 # status  Report what is configured, for an operator setting the bridge up. It

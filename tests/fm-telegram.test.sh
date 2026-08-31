@@ -230,8 +230,12 @@ test_allowed_message_becomes_a_note() {
     || fail "the note does not record Telegram as its source"
   grep -q 'check: captain inbox note' "$home/state/.wake-queue" \
     || fail "the note did not wake firstmate"
-  [ "$(sent_count)" = 1 ] || fail "the bot did not acknowledge the accepted note"
-  pass "an allowed message becomes a durable, acknowledged captain note"
+  # The collector sends nothing of its own. An automatic receipt reached the
+  # captain before firstmate had even read the message, so it was removed:
+  # firstmate's own reply is the confirmation.
+  [ "$(sent_count)" = 0 ] \
+    || fail "the collector sent $(sent_count) unprompted message(s) back to the captain"
+  pass "an allowed message becomes a durable captain note with no bot chatter"
 }
 
 test_message_body_is_stored_verbatim() {
@@ -431,8 +435,8 @@ test_concurrent_collectors_never_queue_a_message_twice() {
 
   [ "$(note_count "$home")" = 1 ] \
     || fail "concurrent collectors queued one message $(note_count "$home") time(s)"
-  [ "$(sent_count)" = 1 ] \
-    || fail "concurrent collectors acknowledged one message $(sent_count) time(s)"
+  [ "$(sent_count)" = 0 ] \
+    || fail "a raced collector sent $(sent_count) unprompted message(s) to the captain"
 
   # And the one that stood down said so, rather than looking like a quiet cycle
   # that had simply found nothing.

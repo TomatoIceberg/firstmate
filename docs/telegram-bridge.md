@@ -12,7 +12,6 @@ In scope:
 
 - **Inbound.** A message from the allowed chat becomes a durable note firstmate picks up at its next check.
 - **Outbound.** Firstmate can send an escalation - a blocker, work ready for review, or a failure.
-- **Acknowledgement.** An accepted message gets a short reply, so the captain knows it landed rather than guessing.
 
 Deliberately not in scope, and each for a reason:
 
@@ -25,6 +24,9 @@ Deliberately not in scope, and each for a reason:
   Telegram cannot approve a merge, answer a held decision, or authorize anything destructive, irreversible, or security-sensitive.
   An inbound message proves which chat it came from, not who typed it, so it can queue an ordinary captain note and nothing else.
   Those decisions stay on the trusted terminal channel.
+- **No automatic acknowledgement.**
+  An accepted message gets no bot receipt.
+  Firstmate's own reply follows shortly through the ordinary note flow, so an automatic "noted" only made the captain read two messages where one would do.
 - **No periodic digest.**
   Only the three escalation kinds go outward, so the channel stays worth reading.
 - **One captain, one chat.**

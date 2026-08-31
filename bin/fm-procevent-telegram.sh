@@ -290,7 +290,6 @@ cmd_poll() {
         if message_has_content "$body"; then
           if queue_note "$update_id" "$body" "$from"; then
             notes=$((notes + 1))
-            fm_telegram_send_text "$FM_TG_CHAT" 'Noted - firstmate will pick this up.' >/dev/null 2>&1 || true
           else
             # Whether the note landed is ambiguous here too: fm-inbox.sh's
             # queue_note moves the note into place before it can still fail
