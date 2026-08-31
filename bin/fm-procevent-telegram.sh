@@ -275,12 +275,13 @@ cmd_poll() {
       | [ (.update_id | tostring),
           (.message.chat.id | tostring),
           ((.message.text // "") | @base64),
-          ((.message.from.id // 0) | tostring) ]
+          ((.message.from.id // 0) | tostring),
+          ((.message.message_id // 0) | tostring) ]
       | @tsv' 2>/dev/null) || updates=
 
     [ -n "$updates" ] || continue
 
-    while IFS=$'\t' read -r update_id chat_id body from; do
+    while IFS=$'\t' read -r update_id chat_id body from message_id; do
       [ -n "$update_id" ] || continue
 
       if fm_telegram_allowlisted && [ "$chat_id" = "$FM_TG_CHAT" ]; then
@@ -290,6 +291,13 @@ cmd_poll() {
         if message_has_content "$body"; then
           if queue_note "$update_id" "$body" "$from"; then
             notes=$((notes + 1))
+            # Best-effort receipt, deliberately AFTER the note is durable and
+            # deliberately unable to fail the collection: a reaction is a
+            # courtesy to the captain, and losing it must never cost the note
+            # or leave the message unconfirmed to Telegram.
+            [ "$message_id" = 0 ] \
+              || fm_telegram_react "$FM_TG_CHAT" "$message_id" >/dev/null 2>&1 \
+              || true
           else
             # Whether the note landed is ambiguous here too: fm-inbox.sh's
             # queue_note moves the note into place before it can still fail

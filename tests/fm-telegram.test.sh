@@ -125,6 +125,23 @@ class H(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n).decode()
+        if method == "setMessageReaction":
+            with LOCK:
+                rfail = load("reactfail.json", {"n": 0})
+                if rfail["n"] > 0:
+                    rfail["n"] -= 1
+                    save("reactfail.json", rfail)
+                    failing = True
+                else:
+                    failing = False
+                if not failing:
+                    reacted = load("reacted.json", [])
+                    reacted.append(json.loads(raw))
+                    save("reacted.json", reacted)
+            if failing:
+                return self._reply({"ok": False, "error_code": 400,
+                                    "description": "REACTION_INVALID"}, 400)
+            return self._reply({"ok": True, "result": True})
         if method != "sendMessage":
             return self._reply({"ok": False, "description": "no such method"}, 404)
         with LOCK:
@@ -164,10 +181,19 @@ API_BASE="http://127.0.0.1:$(cat "$API_ROOT/port")"
 
 set_updates() { printf '%s\n' "$1" > "$API_ROOT/updates.json"; }
 set_failures() { printf '{"n":%s}\n' "$1" > "$API_ROOT/fail.json"; }
-reset_sent() { rm -f "$API_ROOT/sent.json"; }
+reset_sent() { rm -f "$API_ROOT/sent.json" "$API_ROOT/reacted.json" "$API_ROOT/reactfail.json"; }
 sent_count() {
   [ -f "$API_ROOT/sent.json" ] || { printf '0\n'; return 0; }
   jq 'length' < "$API_ROOT/sent.json"
+}
+set_reaction_failures() { printf '{"n":%s}\n' "$1" > "$API_ROOT/reactfail.json"; }
+reacted_count() {
+  [ -f "$API_ROOT/reacted.json" ] || { printf '0\n'; return 0; }
+  jq 'length' < "$API_ROOT/reacted.json"
+}
+reacted_field() {  # <jq-path>
+  [ -f "$API_ROOT/reacted.json" ] || return 1
+  jq -r ".[0].$1" < "$API_ROOT/reacted.json"
 }
 note_count() {  # <home>
   find "$1/state/inbox" -maxdepth 1 -name '*.note' 2>/dev/null | wc -l | tr -d ' '
@@ -208,9 +234,14 @@ run_send() {  # <home> <allowed-chat> <args...>
     "$SEND" "$@"
 }
 
+# The message_id is deliberately NOT the update_id: they are different
+# identifiers in the API, and a reaction sent against the wrong one would still
+# look correct if the fixture let them share a value.
 message_json() {  # <update-id> <chat-id> <text>
   jq -nc --argjson u "$1" --argjson c "$2" --arg t "$3" \
-    '[{update_id: $u, message: {chat: {id: $c}, from: {id: 77}, text: $t}}]'
+    '[{update_id: $u,
+       message: {message_id: ($u + 1000), chat: {id: $c},
+                 from: {id: 77}, text: $t}}]'
 }
 
 # --- cases ------------------------------------------------------------------
@@ -230,12 +261,52 @@ test_allowed_message_becomes_a_note() {
     || fail "the note does not record Telegram as its source"
   grep -q 'check: captain inbox note' "$home/state/.wake-queue" \
     || fail "the note did not wake firstmate"
-  # The collector sends nothing of its own. An automatic receipt reached the
-  # captain before firstmate had even read the message, so it was removed:
-  # firstmate's own reply is the confirmation.
+  # Receipt is a reaction ON the captain's message, never another message in
+  # the chat: the text ack it replaced reached him before firstmate had even
+  # read the message, and he had to read it as a separate line.
   [ "$(sent_count)" = 0 ] \
     || fail "the collector sent $(sent_count) unprompted message(s) back to the captain"
-  pass "an allowed message becomes a durable captain note with no bot chatter"
+  [ "$(reacted_count)" = 1 ] \
+    || fail "the accepted note was not confirmed with a reaction"
+  [ "$(reacted_field 'message_id')" = 1010 ] \
+    || fail "the reaction targeted $(reacted_field 'message_id'), not the message it confirms"
+  [ "$(reacted_field 'chat_id')" = 555 ] \
+    || fail "the reaction went to the wrong chat"
+  [ "$(reacted_field 'reaction[0].emoji')" = "👍" ] \
+    || fail "the reaction is not the expected emoji"
+  [ "$(reacted_field 'reaction[0].type')" = emoji ] \
+    || fail "the reaction was not sent as an emoji reaction"
+  pass "an allowed message is confirmed by a reaction, not another message"
+}
+
+test_a_failed_reaction_never_costs_the_note() {
+  local home
+  home=$(make_home reactfail)
+  reset_sent
+  set_failures 0
+  # Every reaction attempt is refused, the way Telegram refuses an emoji it
+  # does not accept or a message too old to react to.
+  set_reaction_failures 99
+  set_updates "$(message_json 44 555 'confirm nothing, keep everything')"
+  run_poll "$home" 555 >"$TMP_ROOT/reactfail-out" 2>&1
+
+  [ "$(note_count "$home")" = 1 ] \
+    || fail "a refused reaction cost the note it was only meant to confirm"
+  note_body "$home" | grep -qx 'confirm nothing, keep everything' \
+    || fail "the note body did not survive the failed reaction"
+  [ "$(reacted_count)" = 0 ] || fail "the stand-in API recorded a refused reaction"
+  grep -q '^  status: idle' "$TMP_ROOT/reactfail-out" \
+    || fail "a refused reaction was reported as a collection failure: $(cat "$TMP_ROOT/reactfail-out")"
+  grep -q '^  notes: 1' "$TMP_ROOT/reactfail-out" \
+    || fail "the collector did not report the note it queued"
+
+  # And the message stays confirmed to Telegram, so it is not sent again.
+  set_reaction_failures 0
+  set_updates '[]'
+  run_poll "$home" 555 >/dev/null 2>&1
+  [ "$(note_count "$home")" = 1 ] \
+    || fail "the message was collected twice after its reaction failed"
+  pass "a reaction the API refuses never costs the note or replays the message"
 }
 
 test_message_body_is_stored_verbatim() {
@@ -707,6 +778,7 @@ test_note_metadata_options_are_validated() {
 }
 
 test_allowed_message_becomes_a_note
+test_a_failed_reaction_never_costs_the_note
 test_message_body_is_stored_verbatim
 test_unallowlisted_chat_is_silently_dropped
 test_unconfigured_allowlist_reports_the_id_only

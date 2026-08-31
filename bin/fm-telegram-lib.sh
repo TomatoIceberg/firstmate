@@ -14,6 +14,7 @@
 #   fm_telegram_redact      - filter stdin, replacing the bot token with a marker
 #   fm_telegram_api         - call one Telegram Bot API method, printing JSON
 #   fm_telegram_send_text   - send one message to a chat id
+#   fm_telegram_react       - react to one message with an emoji
 #   fm_telegram_state_dir   - the home's durable bridge state directory
 #   fm_telegram_write_atomic - replace a state file atomically
 #
@@ -147,6 +148,33 @@ fm_telegram_send_text() {
     return 1
   fi
   fm_telegram_api sendMessage -X POST \
+    -H 'Content-Type: application/json' --data-binary "@$payload" || rc=$?
+  rm -f "$payload"
+  return "$rc"
+}
+
+# React to one message with a single emoji.
+# fm_telegram_react <chat-id> <message-id> [emoji]
+#
+# This is how the bridge confirms receipt. A reaction lands ON the captain's own
+# message instead of adding another message to the chat, so the confirmation is
+# visible without anything to read or dismiss.
+#
+# `message_id` is required to be an integer by the API, so it is converted with
+# jq's tonumber and a non-numeric id fails the payload build rather than being
+# sent as something the API would reject. Telegram also accepts only a fixed set
+# of emoji as reactions; an unsupported one comes back as an API error, which
+# the best-effort caller ignores like any other reaction failure.
+fm_telegram_react() {
+  local chat=$1 message_id=$2 emoji=${3:-👍} payload rc=0
+  payload=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-react.XXXXXX") || return 1
+  if ! jq -n --arg chat "$chat" --arg mid "$message_id" --arg emoji "$emoji" \
+    '{chat_id: $chat, message_id: ($mid | tonumber),
+      reaction: [{type: "emoji", emoji: $emoji}]}' >"$payload" 2>/dev/null; then
+    rm -f "$payload"
+    return 1
+  fi
+  fm_telegram_api setMessageReaction -X POST \
     -H 'Content-Type: application/json' --data-binary "@$payload" || rc=$?
   rm -f "$payload"
   return "$rc"
