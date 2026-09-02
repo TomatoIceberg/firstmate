@@ -115,6 +115,32 @@ test_consume_splits_title_from_a_multiline_body() {
   pass "consume derives the title from the first line and flattens the full body"
 }
 
+test_consume_truncates_multibyte_text_on_a_character_boundary() {
+  local home result store title_len body_len
+  home=$(make_home multibyte-truncation)
+  result="$home/result.txt"
+  store="$home/data/tickets.json"
+  # 4500 repetitions of the 3-byte CJK character U+3042 (あ): long enough to
+  # straddle both the 200-char title cap and the 4000-char body cap at a
+  # byte offset that falls mid-character, so a byte-based (not
+  # character-based) substr would split a multi-byte sequence and corrupt
+  # the trailing character.
+  write_message_result "$result" "$(printf 'あ%.0s' {1..4500})"
+
+  run_consume "$home" "$result" >/dev/null || fail "consume failed on long multi-byte text"
+  title_len=$(jq -r '.tickets[0].title | length' "$store")
+  body_len=$(jq -r '.tickets[0].body | length' "$store")
+  [ "$title_len" -eq 200 ] || fail "title was not capped at 200 characters: got $title_len"
+  [ "$body_len" -eq 4000 ] || fail "body was not capped at 4000 characters: got $body_len"
+  jq -e '.tickets[0].title | test("�") | not' "$store" >/dev/null \
+    || fail "title contains a replacement character - a multi-byte character was split"
+  jq -e '.tickets[0].body | test("�") | not' "$store" >/dev/null \
+    || fail "body contains a replacement character - a multi-byte character was split"
+  jq -e '.tickets[0].title == ([range(200)] | map("あ") | join(""))' "$store" >/dev/null \
+    || fail "title is not exactly 200 intact copies of the multi-byte character"
+  pass "consume truncates multi-byte text on a character boundary, not a byte boundary"
+}
+
 test_consume_ignores_a_choice_row_alongside_a_message() {
   local home result store out
   home=$(make_home ignore-choice)
@@ -233,6 +259,7 @@ test_consume_ignores_a_replayed_result_instead_of_duplicating_the_ticket() {
 test_consume_extracts_a_message_and_appends_a_ticket
 test_consume_creates_the_store_when_absent
 test_consume_splits_title_from_a_multiline_body
+test_consume_truncates_multibyte_text_on_a_character_boundary
 test_consume_ignores_a_choice_row_alongside_a_message
 test_consume_accepts_a_provably_empty_ended_result
 test_consume_fails_when_content_present_but_no_message_rows

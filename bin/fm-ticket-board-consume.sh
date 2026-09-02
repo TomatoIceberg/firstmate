@@ -86,7 +86,7 @@ STORE=${2:-$("$SCRIPT_DIR/fm-ticket-board.sh" store)}
 new_id() {
   # tkt-<UTC compact timestamp>-<4 hex>: unique enough for a captain-paced
   # single-operator feed; a collision is refused rather than silently merged.
-  printf 'tkt-%s-%04x\n' "$(date -u +%Y%m%dT%H%M%S)" "$((RANDOM % 65536))"
+  printf 'tkt-%s-%04x\n' "$(date -u +%Y%m%dT%H%M%S)" "$(((RANDOM << 1 | RANDOM & 1) % 65536))"
 }
 
 CAPTURED=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-ticket-consume.XXXXXX") || fail "cannot stage captured messages"
