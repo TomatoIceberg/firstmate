@@ -195,6 +195,32 @@ EOF
   pass "consume fails loudly when content is present but no ticket rows were captured, instead of reporting silence"
 }
 
+test_consume_fails_when_a_row_is_truncated_alongside_a_valid_message() {
+  local home result store rc out
+  home=$(make_home truncated-row)
+  result="$home/result.txt"
+  store="$home/data/tickets.json"
+  # The declared count says 2 rows; the second row's write was cut off
+  # mid-field (missing selector/tag/text and its closing quote), the shape a
+  # capture takes when the underlying write did not finish. A parser that
+  # silently drops the row it cannot fully parse would still emit the first,
+  # well-formed row, report a nonzero captured count, and bypass the
+  # zero-captured content-mismatch check entirely - losing the second
+  # captain-typed ticket without any error surfaced anywhere.
+  cat > "$result" <<'EOF'
+session:
+  file: /board.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "","Fix the header spacing","",message,Freeform message
+  "","Second ticket text
+EOF
+  set +e; out=$(run_consume "$home" "$result" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "consume silently accepted a truncated row instead of failing loudly: $out"
+  assert_absent "$store" "consume created a store despite an unparseable captured row"
+  pass "consume fails loudly on a truncated row instead of silently losing the ticket beside a valid one"
+}
+
 test_consume_refuses_a_missing_result_file() {
   local home rc out
   home=$(make_home missing-result)
@@ -263,6 +289,7 @@ test_consume_truncates_multibyte_text_on_a_character_boundary
 test_consume_ignores_a_choice_row_alongside_a_message
 test_consume_accepts_a_provably_empty_ended_result
 test_consume_fails_when_content_present_but_no_message_rows
+test_consume_fails_when_a_row_is_truncated_alongside_a_valid_message
 test_consume_refuses_a_missing_result_file
 test_consume_publishes_the_store_even_when_the_rebuild_fails
 test_consume_ignores_a_replayed_result_instead_of_duplicating_the_ticket

@@ -637,6 +637,17 @@ cmd_read() {
 # fields are decoded/re-encoded as UTF-8 so the cap lands on a character
 # boundary rather than splitting a multi-byte character. A row with no usable
 # text after trimming is skipped.
+#
+# Row completeness is checked with the same reconciliation `cmd_read` already
+# proved out: a value split producing MORE fields than declared is folded
+# back into `prompt`/`text` (captain prose legitimately contains unescaped
+# commas), but a row that still does not resolve to exactly the declared
+# field count - or a capture that yields fewer rows than its own declared
+# count, i.e. the write was cut off mid-row - is a truncated or malformed
+# capture, not "no messages". Exit 3 in that case instead of silently
+# skipping the bad row while still emitting whatever came before it, so a
+# partial capture can never look like a clean, complete zero-or-more read to
+# the caller.
 cmd_messages() {
   local file=${1-}
   [ -n "$file" ] || usage
@@ -659,20 +670,36 @@ cmd_messages() {
       push @rows, $line;
     }
     close $fh;
+    $want = 0 unless defined $want;
+    my $presented = 0;
+    my $malformed = 0;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
       while (length $row) {
         if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
+          push @vals, $1;
         } else {
           $row =~ s/^([^,]*)//;
           push @vals, $1;
         }
         last unless $row =~ s/^,//;
       }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
+      $presented++;
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
       next unless defined $f{tag} && $f{tag} eq "message";
@@ -692,6 +719,7 @@ cmd_messages() {
       $body = substr($body, 0, 4000);
       print "$title\t$body\n";
     }
+    exit 3 if $malformed || $presented != $want;
   ' "$file"
 }
 
