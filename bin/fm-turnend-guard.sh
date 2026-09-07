@@ -251,24 +251,32 @@ autoarm_legacy_claim_live() {
 }
 
 # True while the ledger's current generation is a LIVE signal for THIS Stop
-# event: an open generation claim, a live legacy claimant, or an outcome young
-# enough to belong to the event being decided. The epoch de-dup in
-# budget_account_current_epoch keys on this rather than on the raw generation
-# number, because a superseded ledger entry is frozen forever - a dead or
-# identity-mismatched owner still reading "arming", or a terminal outcome from
-# an earlier episode - and a frozen generation made every later firing look
-# like a repeat observation of the same event. That pinned the bounded block
-# counter (observed at count=1 across six consecutive Stop firings behind a
-# two-day-old orphaned claim, and at count=0 behind a stale terminal one,
-# where the documented attended fail-open could never be reached). A stale
-# entry is therefore accounted as no generation at all, exactly like an absent
-# ledger, so each genuinely blind turn counts once.
+# event: an open generation claim, a live legacy claimant, or a TERMINAL
+# outcome young enough to belong to the event being decided. The epoch de-dup
+# in budget_account_current_epoch keys on this rather than on the raw
+# generation number, because a superseded ledger entry is frozen forever - a
+# dead or identity-mismatched owner still reading "arming", or a terminal
+# outcome from an earlier episode - and a frozen generation made every later
+# firing look like a repeat observation of the same event. That pinned the
+# bounded block counter (observed at count=1 across six consecutive Stop
+# firings behind a two-day-old orphaned claim, and at count=0 behind a stale
+# terminal one, where the documented attended fail-open could never be
+# reached). A stale entry is therefore accounted as no generation at all,
+# exactly like an absent ledger, so each genuinely blind turn counts once.
+#
+# The freshness window below applies only to non-"arming" (terminal) outcomes.
+# fm_autoarm_claim_open already gives a conclusive, immediate answer for
+# "arming": a dead or identity-mismatched owner is never open, grace or no
+# grace. Letting such a claim ride the freshness window too would revive it as
+# a live signal for up to FM_CLAUDE_AUTOARM_EPOCH_FRESH seconds after it was
+# written, even though it was already proven dead.
 autoarm_epoch_signal_live() {
   local outcome
   fm_autoarm_claim_open "$STATE" "$GRACE" && return 0
   autoarm_legacy_claim_live && return 0
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   [ -n "$outcome" ] || return 1
+  [ "$outcome" != arming ] || return 1
   [ "$(fm_path_age "$STATE/.claude-autoarm-epoch")" -lt "$EPOCH_FRESH" ] || return 1
   return 0
 }

@@ -1747,6 +1747,29 @@ test_hook_claude_mode_stale_arming_claim_advances_block_budget() {
   pass "fm-turnend-guard --claude: an orphaned arming claim advances the bounded block budget"
 }
 
+# The same dead-owner claim, but written moments ago instead of two days ago.
+# fm_autoarm_claim_open already gives a conclusive dead-owner verdict for an
+# "arming" outcome with no grace period involved, so the generic terminal-
+# outcome freshness window (FM_CLAUDE_AUTOARM_EPOCH_FRESH) must not revive it
+# as a live signal just because the ledger file is recent. Without an
+# arming-specific exemption this claim would ride that freshness window and
+# pin the block budget for its whole duration instead of advancing at once.
+test_hook_claude_mode_fresh_dead_arming_claim_advances_block_budget() {
+  local dir dead status i count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-fresh-dead-claim-budget")
+  : > "$dir/state/task1.meta"
+  dead=$(reserve_dead_pid)
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=%s\n' "$dead" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  for i in 1 2 3 4; do
+    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true >/dev/null; status=$?
+    expect_code 2 "$status" "a freshly-written dead-owner arming claim must still block turn $i"
+    count=$(claude_block_count "$dir")
+    [ "$count" = "$i" ] || fail "a fresh dead-owner arming claim rode the freshness window and pinned the block budget at $count on turn $i"
+  done
+  pass "fm-turnend-guard --claude: a freshly-written dead-owner arming claim advances the bounded block budget"
+}
+
 # The same staleness on the terminal side, and the reason it matters: with a
 # fully verified failure episode the documented one loud attended fail-open
 # could never be reached, because the frozen generation held the counter below
@@ -2163,6 +2186,7 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_stale_arming_claim_advances_block_budget
+test_hook_claude_mode_fresh_dead_arming_claim_advances_block_budget
 test_hook_claude_mode_stale_failed_epoch_reaches_verified_fail_open
 test_hook_claude_mode_absent_autoarm_advances_block_budget
 test_hook_claude_mode_live_generation_claim_stays_idempotent
