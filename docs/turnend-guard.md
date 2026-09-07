@@ -102,6 +102,9 @@ Each epoch identity is accounted at most once under the budget lock.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
+A known accepted limitation: a primary session that never acquires this home's session lock because another live session already holds `state/.lock` can never reach the attended fail-open.
+`bin/fm-claude-stop-autoarm.sh` stands down in that situation, so this session's auto-arm never runs, never records a failed or failed-suppressed outcome, and never creates the failure notice.
+The block budget alone cannot authorize the fail-open without that verified failure episode, so the session keeps blocking with the repair banner turn after turn until the competing lock ownership is resolved, not until the budget is exhausted.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
